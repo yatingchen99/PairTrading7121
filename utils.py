@@ -7,6 +7,7 @@ import matplotlib.cm as cm
 import statsmodels.api as sm
 import statsmodels.tsa.stattools as ts
 import warnings
+from statsmodels.tsa.arima.model import ARIMA
 warnings.filterwarnings('ignore')
 
 from memoization import cached
@@ -15,6 +16,9 @@ from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans, DBSCAN , OPTICS
 from sklearn.manifold import TSNE 
 from sklearn import preprocessing
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import *
 
 
 def PCA_normalize(df_returns, n_components=50):
@@ -95,3 +99,143 @@ def PairSelection(Price, ticker_count_reduced, clustered_series, significance, s
         Opt_pairs = [x for _, x in sorted(zip(p_value_contval, pairs_contval))]
     
     return Opt_pairs
+
+
+class BaseStrategy:
+    def __init__(self):
+        self.prices_hist = []
+        self.long_threshold = 0
+        self.long_stop_threshold = 0
+        self.short_threshold = 0
+        self.short_stop_threshold = 0
+        self.model = None 
+    
+    def fit(self, prices_hist : pd.Series):
+        pass 
+
+    def predict(self):
+        return (self.long_threshold, 
+                self.long_stop_threshold, 
+                self.short_threshold, 
+                self.short_stop_threshold,)
+
+
+class StrategyArima(BaseStrategy):
+    def __init__(self, params=[-0.5, 0, 0.5, 0]):
+        super().__init__()
+        self.params = params
+    
+    def fit(self, prices_hist, pdq=(5,1,0)):
+        assert len(pdq) == 3, "wrong length of pdq"
+        p, d, q = pdq
+        model = ARIMA(prices_hist, order=(p,d,q)).fit()
+        output = model.forecast()
+        yhat = output.iloc[0]
+        print("Arima predicted", output.iloc[0])
+        sigma = prices_hist.std()
+        l, ls, s, ss = self.params
+        self.long_threshold = yhat + l * sigma 
+        self.long_stop_threshold = yhat + ls * sigma 
+        self.short_threshold = yhat + s * sigma 
+        self.short_stop_threshold = yhat + ss * sigma 
+
+
+class StrategyQuantile(BaseStrategy):
+    def __init__(self, params=[0.2, 0.5, 0.8, 0.5]):
+        super().__init__()
+        self.params = params
+    
+    def fit(self, prices_hist):
+        l, ls, s, ss = self.params
+        self.long_threshold = prices_hist.quantile(l)
+        self.long_stop_threshold = prices_hist.quantile(ls)
+        self.short_threshold = prices_hist.quantile(s)
+        self.short_stop_threshold = prices_hist.quantile(ss)
+
+
+class StrategySigma(BaseStrategy):
+    def __init__(self, params=[-1, 0, 1, 0]):
+        super().__init__()
+        self.params = params
+    
+    def fit(self, prices_hist):
+        sigma = prices_hist.std()
+        mu = prices_hist.mean()
+        l, ls, s, ss = self.params
+        self.long_threshold = mu + l * sigma
+        self.long_stop_threshold = mu + ls * sigma
+        self.short_threshold = mu + s * sigma
+        self.short_stop_threshold = mu + ss * sigma
+
+
+class StrategyRF(BaseStrategy):
+    def __init__(self, params=[-0.5, 0, 0.5, 0]):
+        super().__init__()
+        self.params = params
+        self.clf = None
+
+    def fit(self, prices_hist):
+        if not self.clf or len(prices_hist) % 10 == 0:
+            difs = pd.DataFrame(prices_hist)
+            difs.columns = ["dif"]
+            for i in range(1,10):
+                difs[f"dif{i}"] = difs["dif"].shift(i)
+            difs = difs.dropna()
+            clf = RandomForestRegressor()
+            X_train, y_train = difs.iloc[:-1, 1:], difs.iloc[:-1, 0]
+            X_test, y_test = difs.iloc[-1, 1:], difs.iloc[-1:, 0]
+            clf.fit(X_train, y_train)
+            self.clf = clf 
+        X_test = prices_hist[-9:][::-1]
+        yhat = self.clf.predict([X_test])[0]
+        print("Random Forest predicted", yhat)
+        sigma = prices_hist.std()
+        l, ls, s, ss = self.params
+        self.long_threshold = yhat + l * sigma 
+        self.long_stop_threshold = yhat + ls * sigma 
+        self.short_threshold = yhat + s * sigma 
+        self.short_stop_threshold = yhat + ss * sigma 
+        
+
+
+def backTester(prices : pd.Series, strategy: BaseStrategy, lookback=252*3):
+    
+    prices_train, prices_test = prices[:lookback], prices[lookback:]
+    # mu = prices_train.mean()
+    # sigma = prices_train.std()
+    # long_threshold = prices_train.quantile(0.2)
+    # long_stop_threshold = prices_train.quantile(0.5)
+    # short_threshold = prices_train.quantile(0.8)
+    # short_stop_threshold = prices_train.quantile(0.5)
+
+
+    money = 0; long = False; short = False
+    hists = [] # store each transaction information
+    history = prices_train.tolist()
+    for index, price in prices_test.iteritems():
+        strategy.fit(pd.Series(history))
+        long_threshold, long_stop_threshold, \
+            short_threshold, short_stop_threshold = strategy.predict()
+        history.append(price)
+        if price < long_threshold and not long:
+            long = True
+            money -= price 
+        if price > long_stop_threshold and long:
+            long = False 
+            money += price 
+        if price > short_threshold and not short:  
+            short = True 
+            money += price 
+        if price < short_stop_threshold and short:
+            short = False 
+            money -= price 
+        hists.append([index, price, long, short, money])
+
+    # sell or buy back on the last day
+    if short: money -= price 
+    if long: money += price 
+
+    print("Final money", round(money, 2))
+    df_hist = pd.DataFrame(hists, columns=["date", "price_dif", "long", "short", "money"])
+    
+    return money, df_hist
