@@ -124,6 +124,7 @@ class StrategyArima(BaseStrategy):
     def __init__(self, params=[-0.5, 0, 0.5, 0]):
         super().__init__()
         self.params = params
+        self.model = None
     
     def fit(self, prices_hist, pdq=(5,1,0)):
         assert len(pdq) == 3, "wrong length of pdq"
@@ -201,13 +202,6 @@ class StrategyRF(BaseStrategy):
 def backTester(prices : pd.Series, strategy: BaseStrategy, lookback=252*3):
     
     prices_train, prices_test = prices[:lookback], prices[lookback:]
-    # mu = prices_train.mean()
-    # sigma = prices_train.std()
-    # long_threshold = prices_train.quantile(0.2)
-    # long_stop_threshold = prices_train.quantile(0.5)
-    # short_threshold = prices_train.quantile(0.8)
-    # short_stop_threshold = prices_train.quantile(0.5)
-
 
     money = 0; long = False; short = False
     hists = [] # store each transaction information
@@ -237,5 +231,6 @@ def backTester(prices : pd.Series, strategy: BaseStrategy, lookback=252*3):
 
     print("Final money", round(money, 2))
     df_hist = pd.DataFrame(hists, columns=["date", "price_dif", "long", "short", "money"])
+    df_hist["PnL"] = df_hist["money"] + (df_hist["long"].astype(int) - df_hist["short"].astype(int)) * df_hist["price_dif"]
     
     return money, df_hist
